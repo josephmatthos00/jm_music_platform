@@ -6,7 +6,8 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import * as bcrypt from 'bcrypt';
+import { Prisma } from '@prisma/client';
+import * as bcrypt from 'bcryptjs';
 import { randomBytes, createHash } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
@@ -14,6 +15,7 @@ import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 
 const BCRYPT_ROUNDS = 10;
+const REFRESH_REUSE_TOLERANCE_MS = 30_000;
 
 export interface AuthResult {
   user: {
@@ -37,27 +39,31 @@ export class AuthService {
   ) {}
 
   async register(dto: RegisterDto): Promise<AuthResult> {
-    // Mantemos o .toLowerCase() aqui para padronizar o armazenamento.
-    // O banco é CITEXT, mas queremos garantir que novos registros sejam minúsculos.
     const email = dto.email.toLowerCase().trim();
-
-    const existing = await this.prisma.user.findUnique({ where: { email } });
-    if (existing) throw new ConflictException('E-mail já cadastrado');
-
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
 
-    const user = await this.prisma.user.create({
-      data: { email, name: dto.name.trim(), passwordHash },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        role: true,
-        emailVerified: true,
-      },
-    });
+    let user;
+    try {
+      user = await this.prisma.user.create({
+        data: { email, name: dto.name.trim(), passwordHash },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          role: true,
+          emailVerified: true,
+        },
+      });
+    } catch (e) {
+      if (
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === 'P2002'
+      ) {
+        throw new ConflictException('E-mail já cadastrado');
+      }
+      throw e;
+    }
 
-    // CORREÇÃO 10.1: Falha no envio de e-mail não interrompe o cadastro.
     try {
       await this.sendVerificationEmail(user.id, user.email, user.name);
     } catch (error) {
@@ -69,13 +75,11 @@ export class AuthService {
   }
 
   async login(dto: LoginDto): Promise<AuthResult> {
-    // CORREÇÃO PR 16: O banco é CITEXT, então não precisamos mais do .toLowerCase()
     const email = dto.email.trim();
 
     const user = await this.prisma.user.findUnique({ where: { email } });
 
     if (!user || !user.passwordHash) {
-      // Hash "dummy" pra equalizar o tempo (anti user enumeration)
       await bcrypt.compare(
         dto.password,
         '$2b$10$invalidinvalidinvalidinvalidinvalidinvalidinvalidinva',
@@ -112,8 +116,55 @@ export class AuthService {
       throw new UnauthorizedException('Refresh token inválido ou expirado');
     }
 
-    // Detecção de reuso
+    // CORREÇÃO: Tolerância para concorrência entre abas.
+    // Se o token foi revogado há menos de 30s, pode ter sido outra aba
+    // que acabou de renovar. Nesse caso, devolvemos um novo accessToken
+    // em vez de deslogar o usuário legítimo.
     if (stored.revokedAt) {
+      const revokedAtMs = new Date(stored.revokedAt).getTime();
+      const recentRevoke =
+        Date.now() - revokedAtMs < REFRESH_REUSE_TOLERANCE_MS;
+
+      if (recentRevoke) {
+        const newer = await this.prisma.refreshToken.findFirst({
+          where: {
+            userId: stored.userId,
+            revokedAt: null,
+            expiresAt: { gt: new Date() },
+          },
+          orderBy: { createdAt: 'desc' },
+        });
+
+        if (newer) {
+          const accessToken = await this.jwt.signAsync(
+            {
+              sub: stored.user.id,
+              email: stored.user.email,
+              role: stored.user.role,
+            },
+            {
+              secret: this.config.getOrThrow<string>('JWT_ACCESS_SECRET'),
+              expiresIn: this.parseExpirySeconds(
+                this.config.get<string>('JWT_ACCESS_EXPIRES', '15m'),
+              ),
+            },
+          );
+
+          return {
+            user: {
+              id: stored.user.id,
+              email: stored.user.email,
+              name: stored.user.name,
+              role: stored.user.role,
+              emailVerified: stored.user.emailVerified,
+            },
+            accessToken,
+            refreshToken: '',
+          };
+        }
+      }
+
+      // Reuso real (fora da janela): revoga todas as sessões.
       await this.prisma.refreshToken.updateMany({
         where: { userId: stored.userId, revokedAt: null },
         data: { revokedAt: new Date() },
@@ -162,11 +213,7 @@ export class AuthService {
     return { success: true };
   }
 
-  // ----------------------------------------------------------
-  // FORGOT PASSWORD — anti-enumeração (sempre retorna sucesso)
-  // ----------------------------------------------------------
   async forgotPassword(email: string) {
-    // CORREÇÃO PR 16: O banco é CITEXT, então não precisamos mais do .toLowerCase()
     const normalized = email.trim();
 
     const user = await this.prisma.user.findUnique({
@@ -194,7 +241,6 @@ export class AuthService {
       data: { userId: user.id, tokenHash, expiresAt },
     });
 
-    // Proteção extra: não quebra o fluxo anti-enumeração se o e-mail falhar.
     try {
       await this.mail.sendPasswordResetEmail(user.email, user.name, rawToken);
     } catch (error) {
@@ -208,9 +254,6 @@ export class AuthService {
     };
   }
 
-  // ----------------------------------------------------------
-  // RESET PASSWORD
-  // ----------------------------------------------------------
   async resetPassword(token: string, newPassword: string) {
     const tokenHash = this.hashToken(token);
 
@@ -263,11 +306,6 @@ export class AuthService {
     };
   }
 
-  // ----------------------------------------------------------
-  // EMAIL VERIFICATION
-  // ----------------------------------------------------------
-
-  /** Gera e envia o email de verificação (register + reenvio) */
   private async sendVerificationEmail(
     userId: string,
     email: string,
@@ -288,7 +326,6 @@ export class AuthService {
     await this.mail.sendVerificationEmail(email, name, rawToken);
   }
 
-  /** Reenvia o email (chamado pelo endpoint resend-verification) */
   async resendVerification(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -310,7 +347,6 @@ export class AuthService {
     };
   }
 
-  /** Valida o token e marca o email como verificado */
   async verifyEmail(token: string) {
     const tokenHash = this.hashToken(token);
 
@@ -358,9 +394,6 @@ export class AuthService {
     };
   }
 
-  // ----------------------------------------------------------
-  // HELPERS
-  // ----------------------------------------------------------
   private async issueTokens(user: {
     id: string;
     email: string;

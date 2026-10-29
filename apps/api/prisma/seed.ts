@@ -1,5 +1,5 @@
 import { PrismaClient, UserRole, TrackStatus } from '@prisma/client';
-import * as bcrypt from 'bcrypt';
+import * as bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
 
@@ -46,6 +46,7 @@ const ALBUMS: Array<{
   { title: 'Contraditório',             slug: 'contraditorio',             cover: 'contraditorio.webp',      releaseDate: '2027-03-01', genre: 'Hip Hop',      mood: 'Reflexivo' },
   { title: 'Mundo Atual',               slug: 'mundo-atual',               cover: 'mundoatual.webp',         releaseDate: '2027-03-15', genre: 'Hip Hop',      mood: 'Crítico' },
   { title: 'Tornado da Arte',           slug: 'tornado-da-arte',           cover: 'tornadodaarte.webp',      releaseDate: '2027-04-01', genre: 'Hip Hop',      mood: 'Intenso' },
+  { title: 'Tempo Indomável',           slug: 'tempo-indomavel',           cover: 'tempoindomavel.webp',     releaseDate: '2027-04-01', genre: 'Hip Hop',      mood: 'Intenso' },
 ];
 
 const AINDA_DA_TEMPO_SLUG = 'ainda-da-tempo';

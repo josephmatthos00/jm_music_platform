@@ -47,17 +47,40 @@ async function main() {
 
   console.log(`📁 Pastas encontradas no B2: ${folders.length}`);
 
-  // Busca o ID do artista (Joseph Matthos)
+  // 2. Listar todos os previews
+  const previewList = await s3.send(
+    new ListObjectsV2Command({
+      Bucket: BUCKET,
+      Prefix: 'previews/',
+    }),
+  );
+
+  const previewFiles = (previewList.Contents ?? [])
+    .map((o) => o.Key!)
+    .filter((k) => k.toLowerCase().endsWith('.mp3'));
+
+  // Mapa: "slug-normalizado" -> key do preview
+  const previewMap = new Map<string, string>();
+  for (const key of previewFiles) {
+    const fileName = key.split('/').pop()!.replace(/\.mp3$/i, '');
+    const slug = fileName.replace(/-\d+(-\d+)?$/, '');
+    previewMap.set(slug, key);
+  }
+  console.log(`🎧 Previews encontrados: ${previewMap.size}`);
+
+  // 3. Buscar o ID do artista (Joseph Matthos)
   const artist = await prisma.artist.findFirst({
     where: { slug: 'joseph-matthos' },
     select: { id: true },
   });
   if (!artist) {
-    console.error('❌ Artista Joseph Matthos não encontrado no banco. Rode `npm run seed` primeiro.');
+    console.error(
+      '❌ Artista Joseph Matthos não encontrado no banco. Rode `npx ts-node prisma/seed.ts` primeiro.',
+    );
     process.exit(1);
   }
 
-  // 2. Para cada pasta, listar os MP3
+  // 4. Para cada pasta, listar os MP3 e sincronizar com o banco
   for (const folder of folders) {
     const folderPrefix = `${MEDIA_PREFIX}${folder}/`;
 
@@ -74,41 +97,42 @@ async function main() {
 
     if (mp3s.length === 0) continue;
 
-    // 3. Encontrar o álbum no banco pelo slug (comparando "sem hífen")
+    // Encontrar o álbum no banco pelo slug (comparando "sem hífen")
     const candidates = await prisma.album.findMany({
       select: { id: true, slug: true, title: true },
     });
 
     const album = candidates.find((a) => {
-  const slugified = a.slug.replace(/-/g, '');
-  const folderLower = folder.toLowerCase();
+      const slugified = a.slug.replace(/-/g, '');
+      const folderLower = folder.toLowerCase();
 
-  // Match exato
-  if (slugified === folderLower) return true;
+      // Match exato
+      if (slugified === folderLower) return true;
 
-  // Match com "vol.N" para Mentalidade de Ouro
-  // banco: "mentalidadedeourovol1" | B2: "mentalidadedeourov1"
-  const albumClean = slugified.replace(/vol(\d)/, 'v$1');
-  if (albumClean === folderLower) return true;
+      // Match com "vol.N" para Mentalidade de Ouro
+      const albumClean = slugified.replace(/vol(\d)/, 'v$1');
+      if (albumClean === folderLower) return true;
 
-  return false;
-});
+      return false;
+    });
 
     if (!album) {
-      console.log(`   ⏭️  Pasta "${folder}" não corresponde a nenhum álbum. Ignorando.`);
+      console.log(
+        `   ⏭️  Pasta "${folder}" não corresponde a nenhum álbum. Ignorando.`,
+      );
       continue;
     }
 
     console.log(`\n📀 Álbum: ${album.title} (${album.slug})`);
     console.log(`   ${mp3s.length} faixas no B2`);
 
-    // 4. Buscar as faixas atuais desse álbum
+    // Buscar as faixas atuais desse álbum
     const existingTracks = await prisma.track.findMany({
       where: { albumId: album.id },
       select: { id: true, title: true, streamKey: true },
     });
 
-    // 5. Para cada MP3, criar/atualizar a faixa
+    // Para cada MP3, criar/atualizar a faixa
     for (const key of mp3s) {
       const filename = key.substring(key.lastIndexOf('/') + 1);
       const title = filename
@@ -116,11 +140,17 @@ async function main() {
         .replace(/_/g, ' ')
         .trim();
 
+      const titleSlug = slugify(title);
+      const previewKey = previewMap.get(titleSlug);
+
       const existing = existingTracks.find((t) => t.title === title);
       if (existing) {
         await prisma.track.update({
           where: { id: existing.id },
-          data: { streamKey: key },
+          data: {
+            streamKey: key,
+            ...(previewKey ? { previewKey } : {}),
+          },
         });
         console.log(`   ↻ ${title} → atualizado`);
       } else {
@@ -134,16 +164,17 @@ async function main() {
             genre: 'Hip Hop',
             status: TrackStatus.PUBLISHED,
             streamKey: key,
+            previewKey: previewKey ?? null,
           },
         });
 
         const tiers = [
-          { hours: 24,  name: '24 horas', priceCents: 290,  sortOrder: 1 },
-          { hours: 48,  name: '48 horas', priceCents: 490,  sortOrder: 2 },
-          { hours: 72,  name: '3 dias',   priceCents: 690,  sortOrder: 3 },
-          { hours: 120, name: '5 dias',   priceCents: 990,  sortOrder: 4 },
-          { hours: 240, name: '10 dias',  priceCents: 1290, sortOrder: 5 },
-          { hours: 360, name: '15 dias',  priceCents: 1990, sortOrder: 6 },
+          { hours: 24, name: '24 horas', priceCents: 290, sortOrder: 1 },
+          { hours: 48, name: '48 horas', priceCents: 490, sortOrder: 2 },
+          { hours: 72, name: '3 dias', priceCents: 690, sortOrder: 3 },
+          { hours: 120, name: '5 dias', priceCents: 990, sortOrder: 4 },
+          { hours: 240, name: '10 dias', priceCents: 1290, sortOrder: 5 },
+          { hours: 360, name: '15 dias', priceCents: 1990, sortOrder: 6 },
         ];
 
         await prisma.rentalProduct.createMany({
@@ -162,7 +193,7 @@ async function main() {
       }
     }
 
-    // 6. Apagar as faixas genéricas sem streamKey
+    // 5. Apagar as faixas genéricas sem streamKey
     const orphanTracks = await prisma.track.findMany({
       where: { albumId: album.id, streamKey: null },
       select: { id: true, title: true },

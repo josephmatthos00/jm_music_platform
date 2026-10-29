@@ -14,12 +14,8 @@ import {
   TrackStatus,
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { EntitlementService } from '../entitlement/entitlement.service';
 
-/**
- * Fallback de preços por duração.
- * Fonte de verdade = RentalProduct no banco.
- * Este map só é usado se o RentalProduct não existir (ex: seed antigo).
- */
 const FALLBACK_ALBUM_PRICES: Record<number, number> = {
   24: 1290,
   48: 1990,
@@ -33,7 +29,10 @@ const FALLBACK_ALBUM_PRICES: Record<number, number> = {
 export class RentalService {
   private readonly logger = new Logger(RentalService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly entitlement: EntitlementService,
+  ) {}
 
   // ----------------------------------------------------------
   // PRODUTOS
@@ -161,7 +160,7 @@ export class RentalService {
   }
 
   // ----------------------------------------------------------
-  // CRIAR PEDIDO DE FAIXA — CORREÇÃO 19 e 20
+  // CRIAR PEDIDO DE FAIXA
   // ----------------------------------------------------------
   async createTrackRentalOrder(
     userId: string,
@@ -173,7 +172,7 @@ export class RentalService {
         where: { idempotencyKey },
         select: {
           id: true,
-          userId: true, // <-- ADICIONADO
+          userId: true,
           status: true,
           totalCents: true,
           currency: true,
@@ -189,7 +188,6 @@ export class RentalService {
       });
 
       if (existing) {
-        // CORREÇÃO 19: Valida se o pedido pertence ao usuário.
         if (existing.userId !== userId) {
           throw new ConflictException(
             'A chave de idempotência já está associada a outra operação.',
@@ -302,7 +300,6 @@ export class RentalService {
         idempotent: false,
       };
     } catch (error) {
-      // CORREÇÃO 20: Trata colisão de idempotência (P2002).
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
@@ -375,7 +372,7 @@ export class RentalService {
   }
 
   // ----------------------------------------------------------
-  // CRIAR PEDIDO DE ÁLBUM — CORREÇÃO 19 e 20
+  // CRIAR PEDIDO DE ÁLBUM
   // ----------------------------------------------------------
   async createAlbumRentalOrder(
     userId: string,
@@ -388,7 +385,7 @@ export class RentalService {
         where: { idempotencyKey },
         select: {
           id: true,
-          userId: true, // <-- ADICIONADO
+          userId: true,
           status: true,
           totalCents: true,
           currency: true,
@@ -398,7 +395,6 @@ export class RentalService {
       });
 
       if (existing) {
-        // CORREÇÃO 19: Valida se o pedido pertence ao usuário.
         if (existing.userId !== userId) {
           throw new ConflictException(
             'A chave de idempotência já está associada a outra operação.',
@@ -521,7 +517,6 @@ export class RentalService {
         idempotent: false,
       };
     } catch (error) {
-      // CORREÇÃO 20: Trata colisão de idempotência (P2002).
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
@@ -626,6 +621,9 @@ export class RentalService {
       return { updatedOrder, rental };
     });
 
+    // CORREÇÃO: invalida o cache de entitlement após commit da transação
+    await this.entitlement.invalidateUser(userId);
+
     return result;
   }
 
@@ -698,6 +696,9 @@ export class RentalService {
       return { updatedOrder, rentals };
     });
 
+    // CORREÇÃO: invalida o cache de entitlement após commit da transação
+    await this.entitlement.invalidateUser(userId);
+
     return {
       order: {
         id: result.updatedOrder.id,
@@ -757,6 +758,14 @@ export class RentalService {
   // JOB: expira aluguéis vencidos
   // ----------------------------------------------------------
   async expireOutdatedRentals(): Promise<number> {
+    const expired = await this.prisma.rental.findMany({
+      where: {
+        status: RentalStatus.ACTIVE,
+        expiresAt: { lt: new Date() },
+      },
+      select: { userId: true },
+    });
+
     const result = await this.prisma.rental.updateMany({
       where: {
         status: RentalStatus.ACTIVE,
@@ -765,8 +774,16 @@ export class RentalService {
       data: { status: RentalStatus.EXPIRED },
     });
 
+    // CORREÇÃO: invalida cache de cada usuário afetado
+    const uniqueUsers = new Set(expired.map((r) => r.userId));
+    for (const userId of uniqueUsers) {
+      await this.entitlement.invalidateUser(userId);
+    }
+
     if (result.count > 0) {
-      this.logger.log(`Expirou ${result.count} aluguel(is) vencido(s)`);
+      this.logger.log(
+        `Expirou ${result.count} aluguel(is) vencido(s) para ${uniqueUsers.size} usuário(s)`,
+      );
     }
     return result.count;
   }

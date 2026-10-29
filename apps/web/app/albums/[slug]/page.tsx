@@ -7,7 +7,7 @@ import { api, Album, Track } from '@/lib/api';
 import { usePlayer } from '@/lib/player';
 import { useAuth } from '@/lib/auth';
 import { RentModal } from '@/components/RentModal';
-import { formatYear, formatPrice } from '@/lib/format';
+import { formatYear } from '@/lib/format';
 
 interface AlbumDetail extends Album {
   upc: string | null;
@@ -18,7 +18,6 @@ export default function AlbumPage() {
   const params = useParams();
   const slug = typeof params.slug === 'string' ? params.slug : '';
 
-  // CORREÇÃO: Adicionado 'play' na desestruturação
   const { play, playQueue, current, isPlaying, toggle } = usePlayer();
   const { isAuthenticated } = useAuth();
 
@@ -82,14 +81,8 @@ export default function AlbumPage() {
       toggle();
       return;
     }
-
     const index = tracks.findIndex((t) => t.id === track.id);
-
-    if (index < 0) {
-      // Proteção: a faixa não pertence a este álbum.
-      return;
-    }
-
+    if (index < 0) return;
     playQueue(tracks, index);
   }
 
@@ -170,11 +163,11 @@ export default function AlbumPage() {
 
         {/* Lista de faixas */}
         <div>
-          <div className="grid grid-cols-[40px_1fr_80px_130px_140px] md:grid-cols-[40px_1fr_100px_140px_180px] gap-3 px-3 pb-3 border-b border-line text-xs uppercase tracking-wide text-muted font-bold">
+          {/* Cabeçalho da tabela (só aparece no desktop) */}
+          <div className="hidden md:grid grid-cols-[40px_1fr_100px_180px] gap-3 px-3 pb-3 border-b border-line text-xs uppercase tracking-wide text-muted font-bold">
             <div>#</div>
             <div>Título</div>
             <div className="text-right">Duração</div>
-            <div className="text-right">Preço</div>
             <div className="text-right">Ações</div>
           </div>
 
@@ -186,10 +179,11 @@ export default function AlbumPage() {
               return (
                 <div
                   key={track.id}
-                  className={`grid grid-cols-[40px_1fr_80px_130px_140px] md:grid-cols-[40px_1fr_100px_140px_180px] gap-3 px-3 py-3 rounded-lg items-center transition ${
+                  className={`grid grid-cols-[32px_1fr_auto] md:grid-cols-[40px_1fr_100px_180px] gap-2 md:gap-3 px-3 py-3 rounded-lg items-center transition ${
                     isCurrent ? 'bg-[#e7b95f10]' : 'hover:bg-[#1b2430]'
                   }`}
                 >
+                  {/* Número / ícone de play */}
                   <div className="text-muted text-sm tabular-nums">
                     {isThisPlaying ? (
                       <span className="text-gold2">▶</span>
@@ -198,6 +192,7 @@ export default function AlbumPage() {
                     )}
                   </div>
 
+                  {/* Título (sempre visível) */}
                   <Link
                     href={`/tracks/${track.slug}`}
                     className={`truncate font-medium hover:underline ${
@@ -207,7 +202,8 @@ export default function AlbumPage() {
                     {track.title}
                   </Link>
 
-                  <div className="text-right text-muted text-sm tabular-nums">
+                  {/* Duração (só no desktop) */}
+                  <div className="hidden md:block text-right text-muted text-sm tabular-nums">
                     {track.durationSeconds
                       ? `${Math.floor(track.durationSeconds / 60)}:${String(
                           track.durationSeconds % 60,
@@ -215,10 +211,7 @@ export default function AlbumPage() {
                       : '—'}
                   </div>
 
-                  <div className="text-right text-gold2 font-semibold text-sm whitespace-nowrap">
-                    A partir de {formatPrice(290, 'BRL')}
-                  </div>
-
+                  {/* Ações */}
                   <div className="flex items-center justify-end gap-2">
                     <button
                       onClick={() => handlePlayTrack(track)}
@@ -258,7 +251,9 @@ export default function AlbumPage() {
         <RentModal
           track={rentTrack}
           initialTab={
-            tracks.length > 0 && tracks[0].id === rentTrack.id ? 'album' : 'track'
+            tracks.length > 0 && tracks[0].id === rentTrack.id
+              ? 'album'
+              : 'track'
           }
           onClose={() => setRentTrack(null)}
           onConfirmed={() => setRentTrack(null)}
