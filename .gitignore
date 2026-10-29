@@ -9,3 +9,8 @@ coverage/
 .vscode/
 .idea/
 prisma/migrations/dev.db**.bak
+
+# Arquivos temporários de auditoria
+apps/api/apply-*.js
+apps/api/list-b2*.js
+.next/
