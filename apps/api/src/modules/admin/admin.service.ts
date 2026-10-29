@@ -1,12 +1,20 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { SubscriptionStatus, RentalStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
 import { buildPagination, Paginated } from '../../common/pagination';
 import { ListUsersQueryDto } from './dto/list-users-query.dto';
 
 @Injectable()
 export class AdminService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
+  ) {}
 
   // ----------------------------------------------------------
   // DASHBOARD
@@ -42,7 +50,6 @@ export class AdminService {
       }),
     ]);
 
-    // Receita estimada (pedidos pagos no mês)
     const paidOrdersThisMonth = await this.prisma.order.aggregate({
       where: {
         status: 'PAID',
@@ -62,7 +69,6 @@ export class AdminService {
         tracks: totalTracks,
         publishedTracks,
       },
-      // Correção 32.2: Renomeado de 'revenue' para 'grossRevenue'
       grossRevenue: {
         monthCents: paidOrdersThisMonth._sum.totalCents ?? 0,
         monthOrders: paidOrdersThisMonth._count,
@@ -124,18 +130,23 @@ export class AdminService {
     role: 'CUSTOMER' | 'ADMIN',
     adminId: string,
   ) {
-    // Correção 31.1: Impede a autodespromoção acidental.
+    // Impede a autodespromoção acidental.
     if (userId === adminId && role !== 'ADMIN') {
       throw new BadRequestException(
         'Você não pode remover sua própria permissão de administrador.',
       );
     }
 
-    return this.prisma.user.update({
+    const updated = await this.prisma.user.update({
       where: { id: userId },
       data: { role },
       select: { id: true, email: true, name: true, role: true },
     });
+
+    // Invalida o cache do JWT (JwtStrategy) para o novo role valer imediatamente.
+    await this.redis.del(`jwt:user:${userId}`);
+
+    return updated;
   }
 
   // ----------------------------------------------------------
@@ -175,7 +186,6 @@ export class AdminService {
       by: ['trackId'],
       _count: { trackId: true },
       where: {
-        // Correção 32.1: Conta apenas eventos com segundos tocados > 0.
         secondsPlayed: { gt: 0 },
       },
       orderBy: { _count: { trackId: 'desc' } },
@@ -195,7 +205,6 @@ export class AdminService {
 
     const trackMap = new Map(tracks.map((t) => [t.id, t]));
 
-    // Retorna os dados combinados
     return grouped.map((g) => ({
       track: trackMap.get(g.trackId) ?? null,
       plays: g._count.trackId,

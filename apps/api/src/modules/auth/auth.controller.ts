@@ -23,11 +23,20 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
 const REFRESH_COOKIE = 'jm_refresh_token';
 const REFRESH_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 dias
 
+interface AuthenticatedRequest extends Request {
+  user: {
+    id: string;
+    email: string;
+    name: string;
+    role: 'CUSTOMER' | 'ADMIN';
+    emailVerified: Date | null;
+  };
+}
+
 @Controller('auth')
 export class AuthController {
   constructor(private readonly auth: AuthService) {}
 
-  // Registro: 10 contas por hora por IP
   @Post('register')
   @HttpCode(201)
   @Throttle({ default: { limit: 10, ttl: 60 * 60_000 } })
@@ -40,7 +49,6 @@ export class AuthController {
     return { user: result.user, accessToken: result.accessToken };
   }
 
-  // Login: 5 tentativas por minuto por IP
   @Post('login')
   @HttpCode(200)
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
@@ -53,10 +61,9 @@ export class AuthController {
     return { user: result.user, accessToken: result.accessToken };
   }
 
-  // Refresh: 20 por minuto. Lê o refresh token do cookie httpOnly.
   @Post('refresh')
   @HttpCode(200)
-  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   async refresh(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
@@ -67,7 +74,14 @@ export class AuthController {
     }
 
     const result = await this.auth.refresh(refreshToken);
-    this.setRefreshCookie(res, result.refreshToken);
+
+    // CORREÇÃO: só sobrescreve o cookie se o service gerou um novo.
+    // Se for concorrência entre abas, o service retorna '' e mantemos
+    // o cookie atual da aba vencedora.
+    if (result.refreshToken) {
+      this.setRefreshCookie(res, result.refreshToken);
+    }
+
     return { user: result.user, accessToken: result.accessToken };
   }
 
@@ -85,7 +99,6 @@ export class AuthController {
     return { success: true };
   }
 
-  // Forgot: 3 tentativas por hora por IP (anti brute-force de email)
   @Post('forgot-password')
   @HttpCode(200)
   @Throttle({ default: { limit: 3, ttl: 60 * 60_000 } })
@@ -93,7 +106,6 @@ export class AuthController {
     return this.auth.forgotPassword(dto.email);
   }
 
-  // Reset: 10 tentativas por hora por IP
   @Post('reset-password')
   @HttpCode(200)
   @Throttle({ default: { limit: 10, ttl: 60 * 60_000 } })
@@ -101,7 +113,6 @@ export class AuthController {
     return this.auth.resetPassword(dto.token, dto.password);
   }
 
-  // Verify email: 10 tentativas por minuto
   @Post('verify-email')
   @HttpCode(200)
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
@@ -109,24 +120,20 @@ export class AuthController {
     return this.auth.verifyEmail(dto.token);
   }
 
-  // Resend verification: 3 a cada 5 min (autenticado)
   @Post('resend-verification')
   @HttpCode(200)
   @Throttle({ default: { limit: 3, ttl: 5 * 60_000 } })
   @UseGuards(JwtAuthGuard)
-  resendVerification(@Req() req: any) {
+  resendVerification(@Req() req: AuthenticatedRequest) {
     return this.auth.resendVerification(req.user.id);
   }
 
   @Get('me')
   @UseGuards(JwtAuthGuard)
-  me(@Req() req: any) {
+  me(@Req() req: AuthenticatedRequest) {
     return req.user;
   }
 
-  // ----------------------------------------------------------
-  // Helpers
-  // ----------------------------------------------------------
   private setRefreshCookie(res: Response, token: string) {
     res.cookie(REFRESH_COOKIE, token, {
       ...this.cookieOptions(),
